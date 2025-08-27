@@ -1,17 +1,20 @@
 export type QuollaboreOptions = {
-  portalUrl?: string;   // Q_PORTAL_URL
-  token?: string;       // Q_INGEST_TOKEN
-  projectId?: string;   // Q_PROJECT_ID
-  environment?: string; // Q_ENV
-  parallelTotal?: number; // PARALLEL_TOTAL
-  shardIndex?: number;    // PW_SHARD
+  portalUrl?: string;
+  token?: string;
+  projectId?: string;
+  environment?: string;
+  parallelTotal?: number;
+  shardIndex?: number; 
 };
+
+const DEFAULT_PORTAL_URL = 'https://api.quollabore.com/qa-report';
+
 
 export function loadOptions(partial: QuollaboreOptions = {}): Required<QuollaboreOptions> & {
   ci_job_id: string; git_branch: string; git_commit_sha: string; git_commit_msg: string; git_actor: string;
 } {
   const env = process.env;
-  const portalUrl   = partial.portalUrl   ?? env.Q_PORTAL_URL   ?? '';
+  const portalUrl   = partial.portalUrl ?? env.Q_PORTAL_URL ?? DEFAULT_PORTAL_URL;
   const token       = partial.token       ?? env.Q_INGEST_TOKEN ?? '';
   const projectId   = partial.projectId   ?? env.Q_PROJECT_ID   ?? '';
   const environment = partial.environment ?? env.Q_ENV          ?? 'prod';
@@ -26,7 +29,6 @@ export function loadOptions(partial: QuollaboreOptions = {}): Required<Quollabor
   const parallelTotal = Number(partial.parallelTotal ?? env.PARALLEL_TOTAL ?? 1);
   const shardIndex    = Number(partial.shardIndex    ?? env.PW_SHARD ?? 0);
 
-  if (!portalUrl) throw new Error('Q_PORTAL_URL não definido');
   if (!token)     throw new Error('Q_INGEST_TOKEN não definido');
   if (!projectId) throw new Error('Q_PROJECT_ID não definido');
 
