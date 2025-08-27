@@ -1,0 +1,26 @@
+{
+  "name": "quollabore-playwright-reporter",
+  "version": "0.1.0",
+  "description": "Playwright reporter for Quollabore portal",
+  "type": "module",
+  "main": "dist/reporter.cjs",
+  "module": "dist/reporter.js",
+  "types": "dist/reporter.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/reporter.d.ts",
+      "import": "./dist/reporter.js",
+      "require": "./dist/reporter.cjs"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsc && node scripts/cjs.js"
+  },
+  "peerDependencies": {
+    "@playwright/test": ">=1.40.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0"
+  }
+}
