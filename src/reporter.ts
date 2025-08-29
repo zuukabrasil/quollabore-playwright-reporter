@@ -1,4 +1,16 @@
-import type { Reporter, TestCase, TestResult, FullResult } from '@playwright/test';
+// ANTES
+// import type { Reporter, TestCase, TestResult, FullResult } from '@playwright/test';
+
+// DEPOIS
+import type {
+  Reporter,
+  FullConfig,
+  Suite,
+  TestCase,
+  TestResult,
+  FullResult,
+} from '@playwright/test/reporter';
+
 import { loadOptions, QuollaboreOptions } from './env';
 import { send } from './http';
 
@@ -12,9 +24,11 @@ export class QuollaboreReporter implements Reporter {
     this.opts = loadOptions(options ?? {});
   }
 
-  async onBegin(_config, _suite) {
-    const { portalUrl, token, projectId, environment, parallelTotal,
-      git_branch, git_commit_sha, git_commit_msg, git_actor, ci_job_id } = this.opts;
+  async onBegin(_config: FullConfig, _suite: Suite) {
+    const {
+      portalUrl, token, projectId, environment, parallelTotal,
+      git_branch, git_commit_sha, git_commit_msg, git_actor, ci_job_id
+    } = this.opts;
 
     const res: any = await send(portalUrl, token, {
       type: 'run:start',
@@ -28,11 +42,11 @@ export class QuollaboreReporter implements Reporter {
         status: 'running'
       }
     });
-    this.runId = res.run_id;
+    this.runId = String(res.run_id ?? '');
   }
 
   async onTestBegin(test: TestCase) {
-    const spec = test.location.file;
+    const spec = test.location.file; // string
     let suiteId = this.suiteMap.get(spec);
     if (!suiteId) {
       const res: any = await send(this.opts.portalUrl, this.opts.token, {
@@ -45,8 +59,8 @@ export class QuollaboreReporter implements Reporter {
           status: 'running'
         }
       });
-      suiteId = res.suite_id;
-      this.suiteMap.set(spec, suiteId);
+      suiteId = String(res.suite_id ?? '');
+      this.suiteMap.set(spec, suiteId); // agora é string
     }
 
     const res2: any = await send(this.opts.portalUrl, this.opts.token, {
@@ -59,20 +73,26 @@ export class QuollaboreReporter implements Reporter {
         meta: { project: test.parent?.project()?.name }
       }
     });
-    this.caseMap.set(test, res2.case_id);
+    this.caseMap.set(test, String(res2.case_id ?? ''));
   }
 
   async onTestEnd(test: TestCase, result: TestResult) {
-    const caseId = this.caseMap.get(test)!;
-    const status = result.status === 'passed' ? 'passed'
-      : result.status === 'skipped' ? 'skipped'
-      : 'failed';
+    const caseId = this.caseMap.get(test);
+    if (!caseId) return; // segurança
+
+    const status =
+      result.status === 'passed' ? 'passed' :
+      result.status === 'skipped' ? 'skipped' :
+      'failed';
 
     await send(this.opts.portalUrl, this.opts.token, {
       type: 'case:finish',
       case_id: caseId,
-      status, duration_ms: result.duration,
-      error: result.error ? { message: result.error.message, stack: result.error.stack } : undefined
+      status,
+      duration_ms: result.duration,
+      error: result.error
+        ? { message: result.error.message, stack: result.error.stack }
+        : undefined
     });
   }
 
@@ -85,4 +105,5 @@ export class QuollaboreReporter implements Reporter {
     });
   }
 }
+
 export default QuollaboreReporter;

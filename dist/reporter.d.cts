@@ -1,0 +1,24 @@
+import { Reporter, FullConfig, Suite, TestCase, TestResult, FullResult } from '@playwright/test/reporter';
+
+type QuollaboreOptions = {
+    portalUrl?: string;
+    token?: string;
+    projectId?: string;
+    environment?: string;
+    parallelTotal?: number;
+    shardIndex?: number;
+};
+
+declare class QuollaboreReporter implements Reporter {
+    private runId;
+    private suiteMap;
+    private caseMap;
+    private opts;
+    constructor(options?: QuollaboreOptions);
+    onBegin(_config: FullConfig, _suite: Suite): Promise<void>;
+    onTestBegin(test: TestCase): Promise<void>;
+    onTestEnd(test: TestCase, result: TestResult): Promise<void>;
+    onEnd(result: FullResult): Promise<void>;
+}
+
+export { QuollaboreReporter, QuollaboreReporter as default };
