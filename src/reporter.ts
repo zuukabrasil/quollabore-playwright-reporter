@@ -35,7 +35,47 @@ function mapAttachmentType(a: { name?: string; contentType?: string }): string |
   return null; // desconhecido -> não enviar (evita violar o CHECK)
 }
 
-function chunkString(s: string, size = 8000): string[] {
+// --- reconstrução do call log a partir dos steps ---
+type StepLike = {
+  title?: string;
+  category?: string;
+  error?: { message?: string } | null;
+  steps?: StepLike[];
+  duration?: number;
+};
+
+function pad(n: number) {
+  return '  '.repeat(Math.max(0, n));
+}
+
+function serializeSteps(step: StepLike, depth = 0): string {
+  const parts: string[] = [];
+  const title = step.title ?? '(step)';
+  const cat = step.category ? `[${step.category}] ` : '';
+  const dur = typeof step.duration === 'number' ? ` (${step.duration}ms)` : '';
+  parts.push(`${pad(depth)}• ${cat}${title}${dur}`);
+  if (step.error?.message) {
+    parts.push(`${pad(depth + 1)}↳ error: ${step.error.message}`);
+  }
+  for (const child of step.steps ?? []) {
+    parts.push(serializeSteps(child, depth + 1));
+  }
+  return parts.join('\n');
+}
+
+function buildCallLogFromResult(result: TestResult): string {
+  const roots: StepLike[] = (result as any).steps ?? [];
+  if (!roots.length) return '';
+  const lines: string[] = [];
+  lines.push('[Call Log]');
+  for (const s of roots) lines.push(serializeSteps(s, 0));
+  return lines.join('\n');
+}
+
+// --- envio em chunks para não truncar ---
+const LOG_CHUNK_SIZE = 8000; // seguro p/ payloads; aumente se quiser
+
+function chunkString(s: string, size = LOG_CHUNK_SIZE): string[] {
   if (!s) return [];
   const out: string[] = [];
   for (let i = 0; i < s.length; i += size) out.push(s.slice(i, i + size));
@@ -50,8 +90,8 @@ async function sendBigLog(
   title: string,
   body: string
 ) {
-  const chunks = chunkString(body, 8000);
-  if (chunks.length === 0) return;
+  const chunks = chunkString(body);
+  if (!chunks.length) return;
   let idx = 1;
   for (const part of chunks) {
     await send(portalUrl, token, {
@@ -74,9 +114,12 @@ export class QuollaboreReporter implements Reporter {
   private suiteMap = new Map<string, string>();
   // spec(file path) -> stats
   private suiteStats = new Map<string, SuiteStats>();
-
   // TestCase -> case_id
   private caseMap = new Map<TestCase, string>();
+
+  // buffers de stdout/stderr por teste (para log final)
+  private stdoutBuf = new Map<TestCase, string[]>();
+  private stderrBuf = new Map<TestCase, string[]>();
 
   private opts!: ReturnType<typeof loadOptions>;
 
@@ -106,8 +149,6 @@ export class QuollaboreReporter implements Reporter {
       });
       this.runId = String(res.run_id ?? '');
     } catch (err) {
-      // Não interrompe execução
-      // eslint-disable-next-line no-console
       console.error('[Quollabore] run:start failed:', err);
       this.runId = null;
     }
@@ -128,7 +169,7 @@ export class QuollaboreReporter implements Reporter {
             run_id: this.runId,
             name: spec,
             file_path: spec,
-            shard_index: this.opts.shardIndex, // do env.ts
+            shard_index: this.opts.shardIndex, // ok mesmo sem sharding (0 default)
             status: 'running',
           }
         });
@@ -152,13 +193,16 @@ export class QuollaboreReporter implements Reporter {
         }
       });
       this.caseMap.set(test, String(res2.case_id ?? ''));
+
+      // inicia buffers de stdout/err
+      this.stdoutBuf.set(test, []);
+      this.stderrBuf.set(test, []);
     } catch (err) {
       console.error('[Quollabore] suite/case start failed:', err);
     }
   }
 
   // ----------------- CASE UPDATE (steps) -----------------
-  // Manda updates com o passo atual (nome e categoria) — evita steps internos sem título/categoria
   onStepBegin?(test: TestCase, _result: TestResult, step: TestStep) {
     const caseId = this.caseMap.get(test);
     if (!caseId) return;
@@ -187,38 +231,23 @@ export class QuollaboreReporter implements Reporter {
     }).catch(() => {});
   }
 
-  // ----------------- LOGS -----------------
-  onStdOut?(chunk: string | Buffer, test?: TestCase, _result?: TestResult) {
-    // Associa log ao case somente quando estiver em contexto de teste
+  // ----------------- LOGS (bufferizados) -----------------
+  onStdOut?(chunk: string | Buffer, test?: TestCase) {
     if (!test) return;
-    const caseId = this.caseMap.get(test);
-    if (!caseId) return;
-
-    const message = typeof chunk === 'string' ? chunk : chunk.toString('utf-8');
-    if (!message?.trim()) return;
-
-    send(this.opts.portalUrl, this.opts.token, {
-      type: 'log',
-      case_id: caseId,
-      level: 'info',
-      message,
-    }).catch(() => {});
+    const s = typeof chunk === 'string' ? chunk : chunk.toString('utf-8');
+    if (!s.trim()) return;
+    const arr = this.stdoutBuf.get(test) ?? [];
+    arr.push(s);
+    this.stdoutBuf.set(test, arr);
   }
 
-  onStdErr?(chunk: string | Buffer, test?: TestCase, _result?: TestResult) {
+  onStdErr?(chunk: string | Buffer, test?: TestCase) {
     if (!test) return;
-    const caseId = this.caseMap.get(test);
-    if (!caseId) return;
-
-    const message = typeof chunk === 'string' ? chunk : chunk.toString('utf-8');
-    if (!message?.trim()) return;
-
-    send(this.opts.portalUrl, this.opts.token, {
-      type: 'log',
-      case_id: caseId,
-      level: 'error',
-      message,
-    }).catch(() => {});
+    const s = typeof chunk === 'string' ? chunk : chunk.toString('utf-8');
+    if (!s.trim()) return;
+    const arr = this.stderrBuf.get(test) ?? [];
+    arr.push(s);
+    this.stderrBuf.set(test, arr);
   }
 
   // ----------------- CASE FINISH (+ ARTIFACTS + FAILURE LOG) -----------------
@@ -237,7 +266,6 @@ export class QuollaboreReporter implements Reporter {
     if (s && status === 'failed') s.failures += 1;
 
     // artifacts por attachment.path (se houver)
-    // Se fizer upload antes, troque para usar o storage_path do upload.
     if (Array.isArray(result.attachments)) {
       for (const a of result.attachments) {
         const storage_path = (a as any).path as string | undefined;
@@ -250,10 +278,7 @@ export class QuollaboreReporter implements Reporter {
           await send(this.opts.portalUrl, this.opts.token, {
             type: 'artifact',
             case_id: caseId,
-            artifact: {
-              type: mapped,
-              storage_path,
-            }
+            artifact: { type: mapped, storage_path }
           });
         } catch (err) {
           console.error('[Quollabore] artifact send failed:', err);
@@ -261,11 +286,50 @@ export class QuollaboreReporter implements Reporter {
       }
     }
 
-    // log grande de falha (inclui Call log, stack, etc.)
-    if (status === 'failed' && result.error) {
-      const msg = result.error.message ?? '';
-      const stack = result.error.stack ?? '';
-      const full = [msg, stack].filter(Boolean).join('\n\n');
+    // --- LOG COMPLETO DE FALHA (inclui primary error, errors[], call log, stdout/stderr, attachments)
+    if (status === 'failed') {
+      const parts: string[] = [];
+
+      // Primary error
+      if (result.error) {
+        const msg = result.error.message ?? '';
+        const stack = result.error.stack ?? '';
+        parts.push(['[Primary Error]', msg, stack].filter(Boolean).join('\n'));
+      }
+
+      // Erros adicionais (quando houver)
+      const moreErrors = (result as any).errors as Array<{ message?: string; stack?: string }> | undefined;
+      if (Array.isArray(moreErrors) && moreErrors.length) {
+        moreErrors.forEach((e, i) => {
+          const em = e?.message ?? '';
+          const es = e?.stack ?? '';
+          parts.push([`[Error ${i + 1}]`, em, es].filter(Boolean).join('\n'));
+        });
+      }
+
+      // Call log dos steps
+      const callLog = buildCallLogFromResult(result);
+      if (callLog) parts.push(callLog);
+
+      // stdout/stderr capturados
+      const so = (this.stdoutBuf.get(test) ?? []).join('');
+      const se = (this.stderrBuf.get(test) ?? []).join('');
+      if (so.trim()) parts.push(['[stdout]', so].join('\n'));
+      if (se.trim()) parts.push(['[stderr]', se].join('\n'));
+
+      // paths de attachments úteis (screenshot, video, trace)
+      const attachmentLines: string[] = [];
+      for (const a of result.attachments ?? []) {
+        const p = (a as any).path as string | undefined;
+        if (p) {
+          const n = (a.name || a.contentType || 'attachment');
+          attachmentLines.push(`- ${n}: ${p}`);
+        }
+      }
+      if (attachmentLines.length) parts.push(['[Attachments]', ...attachmentLines].join('\n'));
+
+      const full = parts.filter(Boolean).join('\n\n');
+
       try {
         await sendBigLog(
           this.opts.portalUrl,
@@ -280,6 +344,11 @@ export class QuollaboreReporter implements Reporter {
       }
     }
 
+    // limpa buffers do teste
+    this.stdoutBuf.delete(test);
+    this.stderrBuf.delete(test);
+
+    // case:finish
     try {
       await send(this.opts.portalUrl, this.opts.token, {
         type: 'case:finish',
