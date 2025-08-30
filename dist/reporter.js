@@ -60,15 +60,41 @@ function mapAttachmentType(a) {
   if (n.includes("trace") || ct.includes("zip")) return "trace";
   return null;
 }
-function chunkString(s, size = 8e3) {
+function pad(n) {
+  return "  ".repeat(Math.max(0, n));
+}
+function serializeSteps(step, depth = 0) {
+  const parts = [];
+  const title = step.title ?? "(step)";
+  const cat = step.category ? `[${step.category}] ` : "";
+  const dur = typeof step.duration === "number" ? ` (${step.duration}ms)` : "";
+  parts.push(`${pad(depth)}\u2022 ${cat}${title}${dur}`);
+  if (step.error?.message) {
+    parts.push(`${pad(depth + 1)}\u21B3 error: ${step.error.message}`);
+  }
+  for (const child of step.steps ?? []) {
+    parts.push(serializeSteps(child, depth + 1));
+  }
+  return parts.join("\n");
+}
+function buildCallLogFromResult(result) {
+  const roots = result.steps ?? [];
+  if (!roots.length) return "";
+  const lines = [];
+  lines.push("[Call Log]");
+  for (const s of roots) lines.push(serializeSteps(s, 0));
+  return lines.join("\n");
+}
+var LOG_CHUNK_SIZE = 8e3;
+function chunkString(s, size = LOG_CHUNK_SIZE) {
   if (!s) return [];
   const out = [];
   for (let i = 0; i < s.length; i += size) out.push(s.slice(i, i + size));
   return out;
 }
 async function sendBigLog(portalUrl, token, caseId, level, title, body) {
-  const chunks = chunkString(body, 8e3);
-  if (chunks.length === 0) return;
+  const chunks = chunkString(body);
+  if (!chunks.length) return;
   let idx = 1;
   for (const part of chunks) {
     await send(portalUrl, token, {
@@ -89,6 +115,9 @@ var QuollaboreReporter = class {
   suiteStats = /* @__PURE__ */ new Map();
   // TestCase -> case_id
   caseMap = /* @__PURE__ */ new Map();
+  // buffers de stdout/stderr por teste (para log final)
+  stdoutBuf = /* @__PURE__ */ new Map();
+  stderrBuf = /* @__PURE__ */ new Map();
   opts;
   constructor(options) {
     this.opts = loadOptions(options ?? {});
@@ -143,7 +172,7 @@ var QuollaboreReporter = class {
             name: spec,
             file_path: spec,
             shard_index: this.opts.shardIndex,
-            // do env.ts
+            // ok mesmo sem sharding (0 default)
             status: "running"
           }
         });
@@ -164,12 +193,13 @@ var QuollaboreReporter = class {
         }
       });
       this.caseMap.set(test, String(res2.case_id ?? ""));
+      this.stdoutBuf.set(test, []);
+      this.stderrBuf.set(test, []);
     } catch (err) {
       console.error("[Quollabore] suite/case start failed:", err);
     }
   }
   // ----------------- CASE UPDATE (steps) -----------------
-  // Manda updates com o passo atual (nome e categoria) — evita steps internos sem título/categoria
   onStepBegin(test, _result, step) {
     const caseId = this.caseMap.get(test);
     if (!caseId) return;
@@ -196,34 +226,22 @@ var QuollaboreReporter = class {
     }).catch(() => {
     });
   }
-  // ----------------- LOGS -----------------
-  onStdOut(chunk, test, _result) {
+  // ----------------- LOGS (bufferizados) -----------------
+  onStdOut(chunk, test) {
     if (!test) return;
-    const caseId = this.caseMap.get(test);
-    if (!caseId) return;
-    const message = typeof chunk === "string" ? chunk : chunk.toString("utf-8");
-    if (!message?.trim()) return;
-    send(this.opts.portalUrl, this.opts.token, {
-      type: "log",
-      case_id: caseId,
-      level: "info",
-      message
-    }).catch(() => {
-    });
+    const s = typeof chunk === "string" ? chunk : chunk.toString("utf-8");
+    if (!s.trim()) return;
+    const arr = this.stdoutBuf.get(test) ?? [];
+    arr.push(s);
+    this.stdoutBuf.set(test, arr);
   }
-  onStdErr(chunk, test, _result) {
+  onStdErr(chunk, test) {
     if (!test) return;
-    const caseId = this.caseMap.get(test);
-    if (!caseId) return;
-    const message = typeof chunk === "string" ? chunk : chunk.toString("utf-8");
-    if (!message?.trim()) return;
-    send(this.opts.portalUrl, this.opts.token, {
-      type: "log",
-      case_id: caseId,
-      level: "error",
-      message
-    }).catch(() => {
-    });
+    const s = typeof chunk === "string" ? chunk : chunk.toString("utf-8");
+    if (!s.trim()) return;
+    const arr = this.stderrBuf.get(test) ?? [];
+    arr.push(s);
+    this.stderrBuf.set(test, arr);
   }
   // ----------------- CASE FINISH (+ ARTIFACTS + FAILURE LOG) -----------------
   async onTestEnd(test, result) {
@@ -243,20 +261,44 @@ var QuollaboreReporter = class {
           await send(this.opts.portalUrl, this.opts.token, {
             type: "artifact",
             case_id: caseId,
-            artifact: {
-              type: mapped,
-              storage_path
-            }
+            artifact: { type: mapped, storage_path }
           });
         } catch (err) {
           console.error("[Quollabore] artifact send failed:", err);
         }
       }
     }
-    if (status === "failed" && result.error) {
-      const msg = result.error.message ?? "";
-      const stack = result.error.stack ?? "";
-      const full = [msg, stack].filter(Boolean).join("\n\n");
+    if (status === "failed") {
+      const parts = [];
+      if (result.error) {
+        const msg = result.error.message ?? "";
+        const stack = result.error.stack ?? "";
+        parts.push(["[Primary Error]", msg, stack].filter(Boolean).join("\n"));
+      }
+      const moreErrors = result.errors;
+      if (Array.isArray(moreErrors) && moreErrors.length) {
+        moreErrors.forEach((e, i) => {
+          const em = e?.message ?? "";
+          const es = e?.stack ?? "";
+          parts.push([`[Error ${i + 1}]`, em, es].filter(Boolean).join("\n"));
+        });
+      }
+      const callLog = buildCallLogFromResult(result);
+      if (callLog) parts.push(callLog);
+      const so = (this.stdoutBuf.get(test) ?? []).join("");
+      const se = (this.stderrBuf.get(test) ?? []).join("");
+      if (so.trim()) parts.push(["[stdout]", so].join("\n"));
+      if (se.trim()) parts.push(["[stderr]", se].join("\n"));
+      const attachmentLines = [];
+      for (const a of result.attachments ?? []) {
+        const p = a.path;
+        if (p) {
+          const n = a.name || a.contentType || "attachment";
+          attachmentLines.push(`- ${n}: ${p}`);
+        }
+      }
+      if (attachmentLines.length) parts.push(["[Attachments]", ...attachmentLines].join("\n"));
+      const full = parts.filter(Boolean).join("\n\n");
       try {
         await sendBigLog(
           this.opts.portalUrl,
@@ -270,6 +312,8 @@ var QuollaboreReporter = class {
         console.error("[Quollabore] send failure log failed:", e);
       }
     }
+    this.stdoutBuf.delete(test);
+    this.stderrBuf.delete(test);
     try {
       await send(this.opts.portalUrl, this.opts.token, {
         type: "case:finish",
