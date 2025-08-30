@@ -9,6 +9,9 @@ import type {
   FullResult,
 } from '@playwright/test/reporter';
 
+import fs from 'node:fs';
+import path from 'node:path';
+
 import { loadOptions, QuollaboreOptions } from './env';
 import { send } from './http';
 
@@ -73,8 +76,7 @@ function buildCallLogFromResult(result: TestResult): string {
 }
 
 // --- envio em chunks para não truncar ---
-const LOG_CHUNK_SIZE = 8000; // seguro p/ payloads; aumente se quiser
-
+const LOG_CHUNK_SIZE = 16000; // aumentei um pouco
 function chunkString(s: string, size = LOG_CHUNK_SIZE): string[] {
   if (!s) return [];
   const out: string[] = [];
@@ -101,6 +103,29 @@ async function sendBigLog(
       message: `${title} [${idx}/${chunks.length}]\n${part}`,
     });
     idx++;
+  }
+}
+
+// --- salvar arquivo de log completo e registrar como artifact ---
+function safeFilename(s: string) {
+  return s.replace(/[^\w.-]+/g, '_').slice(0, 120);
+}
+
+function ensureDir(p: string) {
+  if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
+}
+
+function saveFailureLogToFile(test: TestCase, full: string): string | null {
+  try {
+    const outDir = path.join(process.cwd(), 'test-results', 'quollabore-logs');
+    ensureDir(outDir);
+    const spec = path.basename(test.location.file);
+    const title = safeFilename(test.titlePath().join(' > '));
+    const file = path.join(outDir, `${spec}__${title}.log.txt`);
+    fs.writeFileSync(file, full, 'utf-8');
+    return file;
+  } catch {
+    return null;
   }
 }
 
@@ -330,6 +355,7 @@ export class QuollaboreReporter implements Reporter {
 
       const full = parts.filter(Boolean).join('\n\n');
 
+      // envia para logs (chunked)
       try {
         await sendBigLog(
           this.opts.portalUrl,
@@ -341,6 +367,20 @@ export class QuollaboreReporter implements Reporter {
         );
       } catch (e) {
         console.error('[Quollabore] send failure log failed:', e);
+      }
+
+      // salva também em arquivo e registra como artifact (garante 100% do texto)
+      const file = saveFailureLogToFile(test, full);
+      if (file) {
+        try {
+          await send(this.opts.portalUrl, this.opts.token, {
+            type: 'artifact',
+            case_id: caseId,
+            artifact: { type: 'trace', storage_path: file },
+          });
+        } catch (e) {
+          console.error('[Quollabore] failure-log artifact failed:', e);
+        }
       }
     }
 

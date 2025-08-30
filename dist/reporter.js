@@ -1,3 +1,7 @@
+// src/reporter.ts
+import fs from "fs";
+import path from "path";
+
 // src/env.ts
 var DEFAULT_PORTAL_URL = "https://api.quollabore.com/qa-report";
 function loadOptions(partial = {}) {
@@ -85,7 +89,7 @@ function buildCallLogFromResult(result) {
   for (const s of roots) lines.push(serializeSteps(s, 0));
   return lines.join("\n");
 }
-var LOG_CHUNK_SIZE = 8e3;
+var LOG_CHUNK_SIZE = 16e3;
 function chunkString(s, size = LOG_CHUNK_SIZE) {
   if (!s) return [];
   const out = [];
@@ -105,6 +109,25 @@ async function sendBigLog(portalUrl, token, caseId, level, title, body) {
 ${part}`
     });
     idx++;
+  }
+}
+function safeFilename(s) {
+  return s.replace(/[^\w.-]+/g, "_").slice(0, 120);
+}
+function ensureDir(p) {
+  if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
+}
+function saveFailureLogToFile(test, full) {
+  try {
+    const outDir = path.join(process.cwd(), "test-results", "quollabore-logs");
+    ensureDir(outDir);
+    const spec = path.basename(test.location.file);
+    const title = safeFilename(test.titlePath().join(" > "));
+    const file = path.join(outDir, `${spec}__${title}.log.txt`);
+    fs.writeFileSync(file, full, "utf-8");
+    return file;
+  } catch {
+    return null;
   }
 }
 var QuollaboreReporter = class {
@@ -310,6 +333,18 @@ var QuollaboreReporter = class {
         );
       } catch (e) {
         console.error("[Quollabore] send failure log failed:", e);
+      }
+      const file = saveFailureLogToFile(test, full);
+      if (file) {
+        try {
+          await send(this.opts.portalUrl, this.opts.token, {
+            type: "artifact",
+            case_id: caseId,
+            artifact: { type: "trace", storage_path: file }
+          });
+        } catch (e) {
+          console.error("[Quollabore] failure-log artifact failed:", e);
+        }
       }
     }
     this.stdoutBuf.delete(test);
