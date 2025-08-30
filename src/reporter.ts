@@ -14,6 +14,59 @@ import { send } from './http';
 
 type SuiteStats = { tests: number; failures: number; startedAt: number };
 
+// -----------------------------------------------------
+// Helpers
+// -----------------------------------------------------
+const ALLOWED_ARTIFACT_TYPES: Record<string, true> = {
+  screenshot: true,
+  video: true,
+  trace: true,
+  // adicione aqui se o CHECK no banco permitir mais tipos
+  // ex.: stdout: true, stderr: true,
+};
+
+function mapAttachmentType(a: { name?: string; contentType?: string }): string | null {
+  const n = (a.name || '').toLowerCase();
+  const ct = (a.contentType || '').toLowerCase();
+
+  if (n.includes('screenshot') || ct.startsWith('image/')) return 'screenshot';
+  if (n.includes('video') || ct.startsWith('video/')) return 'video';
+  if (n.includes('trace') || ct.includes('zip')) return 'trace';
+  return null; // desconhecido -> não enviar (evita violar o CHECK)
+}
+
+function chunkString(s: string, size = 8000): string[] {
+  if (!s) return [];
+  const out: string[] = [];
+  for (let i = 0; i < s.length; i += size) out.push(s.slice(i, i + size));
+  return out;
+}
+
+async function sendBigLog(
+  portalUrl: string,
+  token: string,
+  caseId: string,
+  level: 'error' | 'info' | 'warn',
+  title: string,
+  body: string
+) {
+  const chunks = chunkString(body, 8000);
+  if (chunks.length === 0) return;
+  let idx = 1;
+  for (const part of chunks) {
+    await send(portalUrl, token, {
+      type: 'log',
+      case_id: caseId,
+      level,
+      message: `${title} [${idx}/${chunks.length}]\n${part}`,
+    });
+    idx++;
+  }
+}
+
+// -----------------------------------------------------
+// Reporter
+// -----------------------------------------------------
 export class QuollaboreReporter implements Reporter {
   private runId: string | null = null;
 
@@ -75,7 +128,7 @@ export class QuollaboreReporter implements Reporter {
             run_id: this.runId,
             name: spec,
             file_path: spec,
-            shard_index: this.opts.shardIndex,
+            shard_index: this.opts.shardIndex, // do env.ts
             status: 'running',
           }
         });
@@ -105,11 +158,10 @@ export class QuollaboreReporter implements Reporter {
   }
 
   // ----------------- CASE UPDATE (steps) -----------------
-  // Manda updates leves com o passo atual (nome e categoria) — opcional
+  // Manda updates com o passo atual (nome e categoria) — evita steps internos sem título/categoria
   onStepBegin?(test: TestCase, _result: TestResult, step: TestStep) {
     const caseId = this.caseMap.get(test);
     if (!caseId) return;
-    // Evita floodar com steps internos do Playwright (como hooks)
     if (!step.category || !step.title) return;
 
     send(this.opts.portalUrl, this.opts.token, {
@@ -169,7 +221,7 @@ export class QuollaboreReporter implements Reporter {
     }).catch(() => {});
   }
 
-  // ----------------- CASE FINISH (+ ARTIFACTS) -----------------
+  // ----------------- CASE FINISH (+ ARTIFACTS + FAILURE LOG) -----------------
   async onTestEnd(test: TestCase, result: TestResult) {
     const caseId = this.caseMap.get(test);
     if (!caseId) return; // segurança
@@ -185,25 +237,46 @@ export class QuollaboreReporter implements Reporter {
     if (s && status === 'failed') s.failures += 1;
 
     // artifacts por attachment.path (se houver)
-    // Se você já fizer upload antes, troque para usar storage_path do upload.
+    // Se fizer upload antes, troque para usar o storage_path do upload.
     if (Array.isArray(result.attachments)) {
       for (const a of result.attachments) {
-        // Preferimos arquivos em disco (path). Conteúdo inline (body) exigiria upload aqui.
         const storage_path = (a as any).path as string | undefined;
-        if (storage_path) {
-          try {
-            await send(this.opts.portalUrl, this.opts.token, {
-              type: 'artifact',
-              case_id: caseId,
-              artifact: {
-                type: a.name ?? a.contentType ?? 'attachment',
-                storage_path,
-              }
-            });
-          } catch (err) {
-            console.error('[Quollabore] artifact send failed:', err);
-          }
+        if (!storage_path) continue;
+
+        const mapped = mapAttachmentType(a);
+        if (!mapped || !ALLOWED_ARTIFACT_TYPES[mapped]) continue;
+
+        try {
+          await send(this.opts.portalUrl, this.opts.token, {
+            type: 'artifact',
+            case_id: caseId,
+            artifact: {
+              type: mapped,
+              storage_path,
+            }
+          });
+        } catch (err) {
+          console.error('[Quollabore] artifact send failed:', err);
         }
+      }
+    }
+
+    // log grande de falha (inclui Call log, stack, etc.)
+    if (status === 'failed' && result.error) {
+      const msg = result.error.message ?? '';
+      const stack = result.error.stack ?? '';
+      const full = [msg, stack].filter(Boolean).join('\n\n');
+      try {
+        await sendBigLog(
+          this.opts.portalUrl,
+          this.opts.token,
+          caseId,
+          'error',
+          'Playwright Failure',
+          full
+        );
+      } catch (e) {
+        console.error('[Quollabore] send failure log failed:', e);
       }
     }
 
