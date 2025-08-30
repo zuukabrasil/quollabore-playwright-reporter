@@ -75,8 +75,8 @@ function buildCallLogFromResult(result: TestResult): string {
   return lines.join('\n');
 }
 
-// --- envio em chunks para não truncar ---
-const LOG_CHUNK_SIZE = 16000; // aumentei um pouco
+// --- envio em chunks para não truncar (mantido para logs auxiliares) ---
+const LOG_CHUNK_SIZE = 16000;
 function chunkString(s: string, size = LOG_CHUNK_SIZE): string[] {
   if (!s) return [];
   const out: string[] = [];
@@ -106,7 +106,7 @@ async function sendBigLog(
   }
 }
 
-// --- salvar arquivo de log completo e registrar como artifact ---
+// --- salvar arquivo de log completo e registrar como artifact (opcional) ---
 function safeFilename(s: string) {
   return s.replace(/[^\w.-]+/g, '_').slice(0, 120);
 }
@@ -127,6 +127,51 @@ function saveFailureLogToFile(test: TestCase, full: string): string | null {
   } catch {
     return null;
   }
+}
+
+// --- MONTA o texto COMPLETO para salvar em automation_cases.error_stack ---
+function buildFullErrorText(test: TestCase, result: TestResult, so: string, se: string): string {
+  const parts: string[] = [];
+
+  // 1) Mensagem e stack originais do Playwright (mensagem geralmente contém o "Call log")
+  if (result.error) {
+    const msg = result.error.message ?? '';
+    const stack = result.error.stack ?? '';
+    parts.push(['[Primary Error Message]', msg].filter(Boolean).join('\n'));
+    if (stack) parts.push(['[Primary Error Stack]', stack].join('\n'));
+  }
+
+  // 2) Erros adicionais (quando houver)
+  const moreErrors = (result as any).errors as Array<{ message?: string; stack?: string }> | undefined;
+  if (Array.isArray(moreErrors) && moreErrors.length) {
+    moreErrors.forEach((e, i) => {
+      const em = e?.message ?? '';
+      const es = e?.stack ?? '';
+      parts.push([`[Error ${i + 1} Message]`, em].filter(Boolean).join('\n'));
+      if (es) parts.push([`[Error ${i + 1} Stack]`, es].join('\n'));
+    });
+  }
+
+  // 3) Steps serializados
+  const callLog = buildCallLogFromResult(result);
+  if (callLog) parts.push(callLog);
+
+  // 4) stdout/stderr do teste
+  if (so.trim()) parts.push(['[stdout]', so].join('\n'));
+  if (se.trim()) parts.push(['[stderr]', se].join('\n'));
+
+  // 5) Paths de attachments úteis
+  const attachmentLines: string[] = [];
+  for (const a of result.attachments ?? []) {
+    const p = (a as any).path as string | undefined;
+    if (p) {
+      const n = (a.name || a.contentType || 'attachment');
+      attachmentLines.push(`- ${n}: ${p}`);
+    }
+  }
+  if (attachmentLines.length) parts.push(['[Attachments]', ...attachmentLines].join('\n'));
+
+  return parts.filter(Boolean).join('\n\n');
 }
 
 // -----------------------------------------------------
@@ -275,7 +320,7 @@ export class QuollaboreReporter implements Reporter {
     this.stderrBuf.set(test, arr);
   }
 
-  // ----------------- CASE FINISH (+ ARTIFACTS + FAILURE LOG) -----------------
+  // ----------------- CASE FINISH (+ ARTIFACTS + SALVAR LOG COMPLETO EM error_stack) -----------------
   async onTestEnd(test: TestCase, result: TestResult) {
     const caseId = this.caseMap.get(test);
     if (!caseId) return; // segurança
@@ -311,51 +356,19 @@ export class QuollaboreReporter implements Reporter {
       }
     }
 
-    // --- LOG COMPLETO DE FALHA (inclui primary error, errors[], call log, stdout/stderr, attachments)
-    if (status === 'failed') {
-      const parts: string[] = [];
+    // ----- MONTA O TEXTO COMPLETO E ENVIA NO error.stack -----
+    const so = (this.stdoutBuf.get(test) ?? []).join('');
+    const se = (this.stderrBuf.get(test) ?? []).join('');
+    let errorPayload: { message?: string; stack?: string } | undefined = undefined;
 
-      // Primary error
-      if (result.error) {
-        const msg = result.error.message ?? '';
-        const stack = result.error.stack ?? '';
-        parts.push(['[Primary Error]', msg, stack].filter(Boolean).join('\n'));
-      }
+    if (result.error) {
+      // mensagem curta (1ª linha) fica no error_message para resumo
+      const shortMsg = String(result.error.message || '').split('\n')[0] || 'Error';
+      // texto completo vai em error_stack
+      const fullText = buildFullErrorText(test, result, so, se);
+      errorPayload = { message: shortMsg, stack: fullText };
 
-      // Erros adicionais (quando houver)
-      const moreErrors = (result as any).errors as Array<{ message?: string; stack?: string }> | undefined;
-      if (Array.isArray(moreErrors) && moreErrors.length) {
-        moreErrors.forEach((e, i) => {
-          const em = e?.message ?? '';
-          const es = e?.stack ?? '';
-          parts.push([`[Error ${i + 1}]`, em, es].filter(Boolean).join('\n'));
-        });
-      }
-
-      // Call log dos steps
-      const callLog = buildCallLogFromResult(result);
-      if (callLog) parts.push(callLog);
-
-      // stdout/stderr capturados
-      const so = (this.stdoutBuf.get(test) ?? []).join('');
-      const se = (this.stderrBuf.get(test) ?? []).join('');
-      if (so.trim()) parts.push(['[stdout]', so].join('\n'));
-      if (se.trim()) parts.push(['[stderr]', se].join('\n'));
-
-      // paths de attachments úteis (screenshot, video, trace)
-      const attachmentLines: string[] = [];
-      for (const a of result.attachments ?? []) {
-        const p = (a as any).path as string | undefined;
-        if (p) {
-          const n = (a.name || a.contentType || 'attachment');
-          attachmentLines.push(`- ${n}: ${p}`);
-        }
-      }
-      if (attachmentLines.length) parts.push(['[Attachments]', ...attachmentLines].join('\n'));
-
-      const full = parts.filter(Boolean).join('\n\n');
-
-      // envia para logs (chunked)
+      // (opcional) também enviar aos logs para consulta incremental
       try {
         await sendBigLog(
           this.opts.portalUrl,
@@ -363,14 +376,14 @@ export class QuollaboreReporter implements Reporter {
           caseId,
           'error',
           'Playwright Failure',
-          full
+          fullText
         );
       } catch (e) {
         console.error('[Quollabore] send failure log failed:', e);
       }
 
-      // salva também em arquivo e registra como artifact (garante 100% do texto)
-      const file = saveFailureLogToFile(test, full);
+      // (opcional) salvar como arquivo e registrar artifact
+      const file = saveFailureLogToFile(test, fullText);
       if (file) {
         try {
           await send(this.opts.portalUrl, this.opts.token, {
@@ -388,16 +401,14 @@ export class QuollaboreReporter implements Reporter {
     this.stdoutBuf.delete(test);
     this.stderrBuf.delete(test);
 
-    // case:finish
+    // case:finish — agora com o log COMPLETO em error.stack
     try {
       await send(this.opts.portalUrl, this.opts.token, {
         type: 'case:finish',
         case_id: caseId,
         status,
         duration_ms: result.duration,
-        error: result.error
-          ? { message: result.error.message, stack: result.error.stack }
-          : undefined
+        error: errorPayload,
       });
     } catch (err) {
       console.error('[Quollabore] case:finish failed:', err);

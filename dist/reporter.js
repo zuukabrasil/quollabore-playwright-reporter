@@ -130,6 +130,38 @@ function saveFailureLogToFile(test, full) {
     return null;
   }
 }
+function buildFullErrorText(test, result, so, se) {
+  const parts = [];
+  if (result.error) {
+    const msg = result.error.message ?? "";
+    const stack = result.error.stack ?? "";
+    parts.push(["[Primary Error Message]", msg].filter(Boolean).join("\n"));
+    if (stack) parts.push(["[Primary Error Stack]", stack].join("\n"));
+  }
+  const moreErrors = result.errors;
+  if (Array.isArray(moreErrors) && moreErrors.length) {
+    moreErrors.forEach((e, i) => {
+      const em = e?.message ?? "";
+      const es = e?.stack ?? "";
+      parts.push([`[Error ${i + 1} Message]`, em].filter(Boolean).join("\n"));
+      if (es) parts.push([`[Error ${i + 1} Stack]`, es].join("\n"));
+    });
+  }
+  const callLog = buildCallLogFromResult(result);
+  if (callLog) parts.push(callLog);
+  if (so.trim()) parts.push(["[stdout]", so].join("\n"));
+  if (se.trim()) parts.push(["[stderr]", se].join("\n"));
+  const attachmentLines = [];
+  for (const a of result.attachments ?? []) {
+    const p = a.path;
+    if (p) {
+      const n = a.name || a.contentType || "attachment";
+      attachmentLines.push(`- ${n}: ${p}`);
+    }
+  }
+  if (attachmentLines.length) parts.push(["[Attachments]", ...attachmentLines].join("\n"));
+  return parts.filter(Boolean).join("\n\n");
+}
 var QuollaboreReporter = class {
   runId = null;
   // spec(file path) -> suite_id
@@ -266,7 +298,7 @@ var QuollaboreReporter = class {
     arr.push(s);
     this.stderrBuf.set(test, arr);
   }
-  // ----------------- CASE FINISH (+ ARTIFACTS + FAILURE LOG) -----------------
+  // ----------------- CASE FINISH (+ ARTIFACTS + SALVAR LOG COMPLETO EM error_stack) -----------------
   async onTestEnd(test, result) {
     const caseId = this.caseMap.get(test);
     if (!caseId) return;
@@ -291,37 +323,13 @@ var QuollaboreReporter = class {
         }
       }
     }
-    if (status === "failed") {
-      const parts = [];
-      if (result.error) {
-        const msg = result.error.message ?? "";
-        const stack = result.error.stack ?? "";
-        parts.push(["[Primary Error]", msg, stack].filter(Boolean).join("\n"));
-      }
-      const moreErrors = result.errors;
-      if (Array.isArray(moreErrors) && moreErrors.length) {
-        moreErrors.forEach((e, i) => {
-          const em = e?.message ?? "";
-          const es = e?.stack ?? "";
-          parts.push([`[Error ${i + 1}]`, em, es].filter(Boolean).join("\n"));
-        });
-      }
-      const callLog = buildCallLogFromResult(result);
-      if (callLog) parts.push(callLog);
-      const so = (this.stdoutBuf.get(test) ?? []).join("");
-      const se = (this.stderrBuf.get(test) ?? []).join("");
-      if (so.trim()) parts.push(["[stdout]", so].join("\n"));
-      if (se.trim()) parts.push(["[stderr]", se].join("\n"));
-      const attachmentLines = [];
-      for (const a of result.attachments ?? []) {
-        const p = a.path;
-        if (p) {
-          const n = a.name || a.contentType || "attachment";
-          attachmentLines.push(`- ${n}: ${p}`);
-        }
-      }
-      if (attachmentLines.length) parts.push(["[Attachments]", ...attachmentLines].join("\n"));
-      const full = parts.filter(Boolean).join("\n\n");
+    const so = (this.stdoutBuf.get(test) ?? []).join("");
+    const se = (this.stderrBuf.get(test) ?? []).join("");
+    let errorPayload = void 0;
+    if (result.error) {
+      const shortMsg = String(result.error.message || "").split("\n")[0] || "Error";
+      const fullText = buildFullErrorText(test, result, so, se);
+      errorPayload = { message: shortMsg, stack: fullText };
       try {
         await sendBigLog(
           this.opts.portalUrl,
@@ -329,12 +337,12 @@ var QuollaboreReporter = class {
           caseId,
           "error",
           "Playwright Failure",
-          full
+          fullText
         );
       } catch (e) {
         console.error("[Quollabore] send failure log failed:", e);
       }
-      const file = saveFailureLogToFile(test, full);
+      const file = saveFailureLogToFile(test, fullText);
       if (file) {
         try {
           await send(this.opts.portalUrl, this.opts.token, {
@@ -355,7 +363,7 @@ var QuollaboreReporter = class {
         case_id: caseId,
         status,
         duration_ms: result.duration,
-        error: result.error ? { message: result.error.message, stack: result.error.stack } : void 0
+        error: errorPayload
       });
     } catch (err) {
       console.error("[Quollabore] case:finish failed:", err);
