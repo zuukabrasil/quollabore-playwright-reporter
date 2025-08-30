@@ -11,7 +11,9 @@ O pacote intercepta os eventos do runner (before:run, after:spec, after:run), en
 
 **Com escopo (recomendado):**
 
-`npm i -D quollabore-playwright-reporter # ou yarn add -D -quollabore-playwright-reporter`
+```
+npm i -D quollabore-playwright-reporter
+```
 
 ---
 
@@ -93,14 +95,6 @@ type QuollaboreOptions = {
 ```
 
 > Se você **não** passar nada, o reporter usa apenas as variáveis de ambiente.
-
----
-
-## 🔐 Segurança
-
-*   Use **token por projeto/ambiente**, nunca tokens pessoais.
-*   Guarde `Q_INGEST_TOKEN` como **secret** no CI (GitHub/GitLab/Azure/Bitbucket).
-*   A Edge Function deve **validar o Bearer** recebido (ideal: comparar **hash** em tabela de tokens).
 
 ---
 
@@ -191,11 +185,9 @@ steps:
 
 ## ✅ Checklist de integração
 
-*    Instalou o pacote (`-quollabore-playwright-reporter` **ou** `quollabore-playwright-reporter`)?
+*    Instalou o pacote (`quollabore-playwright-reporter`)?
 *   Adicionou `withQuollabore` no `cyplaywrightpress.config.ts`?
 *   Definiu  `Q_INGEST_TOKEN`, `Q_PROJECT_ID` no CI?
-*   Sua Edge Function está publicada e validando `Authorization: Bearer <token>`?
-*   Tabelas `automation_*` criadas e com Realtime habilitado (se for usar live)?
 
 ---
 
@@ -205,13 +197,8 @@ steps:
 → Garanta que as variáveis estejam presentes no ambiente do job do CI (e não só no repositório local).
 
 **HTTP 401/403**  
-→ Token inválido/revogado ou a função não está aceitando o Bearer. Verifique a validação na Edge Function.
+→ Token inválido/revogado ou a função não está aceitando o Bearer. 
 
-**HTTP 404/5xx**  
-→ Função está fora do ar. Teste localmente com `curl` e verifique os logs do Supabase.
-
-**Nada aparece no portal**  
-→ Confirme se os eventos estão chegando (logs da função) e se as **FKs** (`automation_suites.run_id`, `automation_cases.suite_id`, etc.) batem com o schema.
 
 ---
 
