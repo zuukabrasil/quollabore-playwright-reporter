@@ -38,7 +38,7 @@ var import_node_fs = __toESM(require("fs"), 1);
 var import_node_path = __toESM(require("path"), 1);
 
 // src/env.ts
-var DEFAULT_PORTAL_URL = "https://api.quollabore.com/qa-report";
+var DEFAULT_PORTAL_URL = "https://report-api.quollabore.com/";
 function loadOptions(partial = {}) {
   const env = process.env;
   const portalUrl = partial.portalUrl ?? env.Q_PORTAL_URL ?? DEFAULT_PORTAL_URL;

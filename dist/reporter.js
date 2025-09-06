@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 
 // src/env.ts
-var DEFAULT_PORTAL_URL = "https://api.quollabore.com/qa-report";
+var DEFAULT_PORTAL_URL = "https://report-api.quollabore.com/";
 function loadOptions(partial = {}) {
   const env = process.env;
   const portalUrl = partial.portalUrl ?? env.Q_PORTAL_URL ?? DEFAULT_PORTAL_URL;
