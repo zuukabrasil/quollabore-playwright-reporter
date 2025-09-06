@@ -7,7 +7,7 @@ export type QuollaboreOptions = {
   shardIndex?: number; 
 };
 
-const DEFAULT_PORTAL_URL = 'https://api.quollabore.com/qa-report';
+const DEFAULT_PORTAL_URL = 'https://report-api.quollabore.com/';
 
 
 export function loadOptions(partial: QuollaboreOptions = {}): Required<QuollaboreOptions> & {
